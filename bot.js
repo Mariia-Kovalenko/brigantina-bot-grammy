@@ -10,6 +10,7 @@ import {
 } from "./spreadsheets/spreadsheets.js";
 import { COMMANDS, MESSAGES } from "./utils/constants.js";
 import { InlineKeyboard, Keyboard } from "grammy";
+import http from "http";
 import { getUpcomingEvents } from "./utils/helpers.js";
 
 // 1. Setup bot and session
@@ -371,3 +372,19 @@ bot.on("message:text", async (ctx) => {
 
 // 5. Start the bot
 bot.start();
+
+// Minimal HTTP server for Render port binding / health checks
+const PORT = process.env.PORT || 3000;
+http
+  .createServer((req, res) => {
+    if (req.url === "/healthz") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("OK");
+  })
+  .listen(PORT, () => {
+    console.log("HTTP server listening on", PORT);
+  });
