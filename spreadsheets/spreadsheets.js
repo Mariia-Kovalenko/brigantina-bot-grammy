@@ -282,3 +282,97 @@ export async function getCoaches(competitionId) {
 //     }
 // }
 
+function parseCsvToArray(value) {
+  if (!value) return [];
+  return String(value)
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+export async function getMerch() {
+  try {
+    await doc.loadInfo();
+    const sheet = doc.sheetsByTitle["merch"];
+    if (!sheet) {
+      console.error("No 'merch' sheet found");
+      return [];
+    }
+    const rows = await sheet.getRows();
+    return rows.map((row) => ({
+      id: row.get("id"),
+      name: row.get("name"),
+      category: row.get("category"),
+      price: row.get("price"),
+      colors: parseCsvToArray(row.get("colors")),
+      sizes: parseCsvToArray(row.get("sizes")),
+      image: row.get("image"),
+      description: row.get("description") || '',
+    }));
+  } catch (error) {
+    console.error("Error fetching merch:", error);
+    return [];
+  }
+}
+
+export async function getMerchCategories() {
+  const items = await getMerch();
+  const set = new Set(items.map((i) => i.category).filter(Boolean));
+  return Array.from(set);
+}
+
+export async function saveMerchOrder(order) {
+  try {
+    await doc.loadInfo();
+    let sheet = doc.sheetsByTitle["merch_orders"];
+    if (!sheet) {
+      sheet = await doc.addSheet({
+        title: "merch_orders",
+        headerValues: [
+          "timestamp",
+          "user_id",
+          "username",
+          "first_name",
+          "last_name",
+          "category",
+          "item_id",
+          "item_name",
+          "color",
+          "size",
+          "quantity",
+          "price",
+          "total",
+          "notes",
+        ],
+      });
+    }
+
+    const quantity = Number(order.quantity) || 1;
+    const priceNum = Number(order.price) || 0;
+    const total = quantity * priceNum;
+
+    const rowData = {
+      timestamp: new Date().toISOString(),
+      user_id: order.userId || '',
+      username: order.username || '',
+      first_name: order.firstName || '',
+      last_name: order.lastName || '',
+      category: order.category || '',
+      item_id: order.itemId || '',
+      item_name: order.itemName || '',
+      color: order.color || '',
+      size: order.size || '',
+      quantity,
+      price: priceNum,
+      total,
+      notes: order.notes || '',
+    };
+
+    await sheet.addRow(rowData);
+    return true;
+  } catch (error) {
+    console.error("Error saving merch order:", error);
+    throw error;
+  }
+}
+

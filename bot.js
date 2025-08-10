@@ -9,7 +9,7 @@ import {
     saveRegistration,
 } from "./spreadsheets/spreadsheets.js";
 import { COMMANDS, MESSAGES } from "./utils/constants.js";
-import { InlineKeyboard } from "grammy";
+import { InlineKeyboard, Keyboard } from "grammy";
 import { getUpcomingEvents } from "./utils/helpers.js";
 
 // 1. Setup bot and session
@@ -302,8 +302,15 @@ bot.command(COMMANDS.REGISTER, async (ctx) => {
     await ctx.conversation.enter("registrationConversation");
 });
 
+// Build main menu keyboard
+const mainMenu = new Keyboard()
+    .text("Інформація").row()
+    .text("Переглянути змагання").row()
+    .text("Реєстрація на змагання").row()
+    .text("Допомога").resized();
+
 bot.command(COMMANDS.START, async (ctx) => {
-    await ctx.reply("Welcome! Up and running.");
+    await ctx.reply("Welcome! Up and running.", { reply_markup: mainMenu });
 });
 
 bot.command(COMMANDS.INFO, async (ctx) => {
@@ -312,6 +319,26 @@ bot.command(COMMANDS.INFO, async (ctx) => {
 
 bot.command(COMMANDS.EVENTS, async (ctx) => {
     await ctx.reply(MESSAGES.EVENTS);
+});
+bot.command(COMMANDS.HELP, async (ctx) => {
+    await ctx.reply(MESSAGES.HELP);
+});
+
+// Menu button handlers (mimic commands)
+bot.hears("Інформація", async (ctx) => {
+    await ctx.reply(MESSAGES.INFO);
+});
+
+bot.hears("Переглянути змагання", async (ctx) => {
+    await ctx.reply(MESSAGES.EVENTS);
+});
+
+bot.hears("Реєстрація на змагання", async (ctx) => {
+    await ctx.conversation.enter("registrationConversation");
+});
+
+bot.hears("Допомога", async (ctx) => {
+    await ctx.reply("Доступні команди:\n/start — головне меню\n/info — інформація\n/events — переглянути змагання\n/register — реєстрація на змагання");
 });
 
 // Text handler for text steps
