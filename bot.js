@@ -295,6 +295,31 @@ async function generateDynamicStep(event) {
     return steps;
 }
 
+// Helper: send list of upcoming events with short info
+async function sendEventsList(ctx) {
+    try {
+        let events = await getEvents();
+        events = getUpcomingEvents(events);
+        if (!events || events.length === 0) {
+            await ctx.reply("Наразі немає доступних заходів. Спробуйте пізніше.");
+            return;
+        }
+        let response = "Ось перелік найближчих заходів:\n\n";
+        events.forEach((event, idx) => {
+            const info = (event.info || "").replace(/\\n/g, "\n");
+            response += `${idx + 1}. ${event.name}\n${info}\n\n`;
+        });
+        // Telegram message limit guard
+        if (response.length > 3500) {
+            response = response.slice(0, 3490) + "...";
+        }
+        await ctx.reply(response);
+    } catch (e) {
+        console.error("Error sending events list:", e);
+        await ctx.reply("Не вдалося отримати список змагань. Спробуйте пізніше.");
+    }
+}
+
 // 3. Register the conversation
 bot.use(createConversation(registrationConversation));
 
@@ -311,7 +336,7 @@ const mainMenu = new Keyboard()
     .text("Допомога").resized();
 
 bot.command(COMMANDS.START, async (ctx) => {
-    await ctx.reply("Welcome! Up and running.", { reply_markup: mainMenu });
+    await ctx.reply(MESSAGES.START, { reply_markup: mainMenu });
 });
 
 bot.command(COMMANDS.INFO, async (ctx) => {
@@ -319,7 +344,7 @@ bot.command(COMMANDS.INFO, async (ctx) => {
 });
 
 bot.command(COMMANDS.EVENTS, async (ctx) => {
-    await ctx.reply(MESSAGES.EVENTS);
+    await sendEventsList(ctx);
 });
 bot.command(COMMANDS.HELP, async (ctx) => {
     await ctx.reply(MESSAGES.HELP);
@@ -331,7 +356,7 @@ bot.hears("Інформація", async (ctx) => {
 });
 
 bot.hears("Переглянути змагання", async (ctx) => {
-    await ctx.reply(MESSAGES.EVENTS);
+    await sendEventsList(ctx);
 });
 
 bot.hears("Реєстрація на змагання", async (ctx) => {
