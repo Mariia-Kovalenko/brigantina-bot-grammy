@@ -47,6 +47,32 @@ async function registrationConversation(conversation, ctx) {
     });
 }
 
+// Events conversation: send all upcoming events with short info, then exit
+async function eventsConversation(conversation, ctx) {
+    try {
+        let events = await getEvents();
+        events = getUpcomingEvents(events);
+        if (!events || events.length === 0) {
+            await ctx.reply("Наразі немає доступних заходів. Спробуйте пізніше.");
+            return;
+        }
+        // Build message with name and info per event
+        let message = "Ось перелік найближчих заходів:\n\n";
+        for (const ev of events) {
+            const info = (ev.info || "").replace(/\\n/g, "\n");
+            message += `🔹 ${ev.name}\n ℹ️ ${info}\n\n`;
+        }
+        // Telegram has a 4096 char limit; send in chunks if needed
+        const MAX = 3500;
+        for (let i = 0; i < message.length; i += MAX) {
+            await ctx.reply(message.slice(i, i + MAX));
+        }
+    } catch (e) {
+        console.error("Error in eventsConversation:", e);
+        await ctx.reply("Сталася помилка під час завантаження заходів. Спробуйте пізніше.");
+    }
+}
+
 // Helper to build multi-select keyboard for coaches
 function buildMultiSelectKeyboard(options, selected, callbackPrefix) {
     const keyboard = new InlineKeyboard();
@@ -295,33 +321,9 @@ async function generateDynamicStep(event) {
     return steps;
 }
 
-// Helper: send list of upcoming events with short info
-async function sendEventsList(ctx) {
-    try {
-        let events = await getEvents();
-        events = getUpcomingEvents(events);
-        if (!events || events.length === 0) {
-            await ctx.reply("Наразі немає доступних заходів. Спробуйте пізніше.");
-            return;
-        }
-        let response = "Ось перелік найближчих заходів:\n\n";
-        events.forEach((event, idx) => {
-            const info = (event.info || "").replace(/\\n/g, "\n");
-            response += `${idx + 1}. ${event.name}\n${info}\n\n`;
-        });
-        // Telegram message limit guard
-        if (response.length > 3500) {
-            response = response.slice(0, 3490) + "...";
-        }
-        await ctx.reply(response);
-    } catch (e) {
-        console.error("Error sending events list:", e);
-        await ctx.reply("Не вдалося отримати список змагань. Спробуйте пізніше.");
-    }
-}
-
 // 3. Register the conversation
 bot.use(createConversation(registrationConversation));
+bot.use(createConversation(eventsConversation));
 
 // 4. Command to start registration
 bot.command(COMMANDS.REGISTER, async (ctx) => {
@@ -344,7 +346,7 @@ bot.command(COMMANDS.INFO, async (ctx) => {
 });
 
 bot.command(COMMANDS.EVENTS, async (ctx) => {
-    await sendEventsList(ctx);
+    await ctx.conversation.enter("eventsConversation");
 });
 bot.command(COMMANDS.HELP, async (ctx) => {
     await ctx.reply(MESSAGES.HELP);
@@ -356,7 +358,7 @@ bot.hears("Інформація", async (ctx) => {
 });
 
 bot.hears("Переглянути змагання", async (ctx) => {
-    await sendEventsList(ctx);
+    await ctx.conversation.enter("eventsConversation");
 });
 
 bot.hears("Реєстрація на змагання", async (ctx) => {
