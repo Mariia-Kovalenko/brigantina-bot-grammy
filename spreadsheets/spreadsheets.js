@@ -152,10 +152,10 @@ export async function saveRegistration(userState) {
         console.log('Final row data to be saved:', rowData);
 
         // Add the registration data to the sheet
-        await sheet.addRow(rowData);
+        const result = await sheet.addRow(rowData);
+        console.log('result', result);
         console.log('Row added successfully');
-
-        return true;
+        return result;
     } catch (error) {
         console.error('Error in saveRegistration:', error);
         throw error;

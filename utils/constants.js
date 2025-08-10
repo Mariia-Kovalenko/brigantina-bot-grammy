@@ -1,9 +1,9 @@
 export const COMMANDS = {
-    START: "/start",
-    INFO: "/info",
-    EVENTS: "/events",
-    REGISTER: "/register",
-    HELP: "/help"
+    START: "start",
+    INFO: "info",
+    EVENTS: "events",
+    REGISTER: "register",
+    HELP: "help"
 }
 
 export const MESSAGES = {

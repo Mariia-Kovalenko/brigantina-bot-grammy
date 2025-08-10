@@ -11,6 +11,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@grammyjs/conversations": "^2.1.0",
     "dotenv": "^17.2.1",
     "google-auth-library": "^10.2.1",
     "google-spreadsheet": "^5.0.2",
