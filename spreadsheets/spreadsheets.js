@@ -151,16 +151,21 @@ export async function saveRegistration(userState) {
 
         console.log('Final row data to be saved:', rowData);
 
-        // Add the registration data to the sheet
-        const result = await sheet.addRow(rowData);
-        console.log('result', result);
-        console.log('Row added successfully');
-        return result;
+        try {
+            const result = await sheet.addRow(rowData);
+            console.log('result', result);
+            console.log('Row added successfully');
+            return result;
+        } catch (e) {
+            console.error('Error or timeout adding row:', e);
+            throw e;
+        }
     } catch (error) {
         console.error('Error in saveRegistration:', error);
         throw error;
     }
 }
+
 
 export async function getEventColumns(event) {
   try {
