@@ -7,11 +7,29 @@ import {
     getAgeGroups,
     getCoaches,
     saveRegistration,
+    getMerchProducts,
+    getMerchCategories,
+    saveMerchOrdersSimple,
 } from "./spreadsheets/spreadsheets.js";
 import { COMMANDS, MESSAGES } from "./utils/constants.js";
 import { InlineKeyboard, Keyboard } from "grammy";
 import http from "http";
 import { getUpcomingEvents } from "./utils/helpers.js";
+
+// Simple in-memory caches for merch
+const PRODUCT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+let productCache = { items: [], fetchedAt: 0 };
+const productImageFileIdCache = new Map(); // productId -> file_id
+
+async function getProductsCached() {
+    const now = Date.now();
+    if (productCache.items.length && now - productCache.fetchedAt < PRODUCT_CACHE_TTL_MS) {
+        return productCache.items;
+    }
+    const items = await getMerchProducts();
+    productCache = { items, fetchedAt: now };
+    return items;
+}
 
 // 1. Setup bot and session
 const bot = new Bot(process.env.BOT_TOKEN);
@@ -73,6 +91,244 @@ async function eventsConversation(conversation, ctx) {
     }
 }
 
+// Merch conversation: browse categories and products with a pseudo-cart
+async function merchConversation(conversation, ctx) {
+    // ensure session and cart exist
+    ctx.session = ctx.session || {};
+    if (!ctx.session.merchCart) ctx.session.merchCart = [];
+    let currentCategory = null;
+    let checkout = { name: "", phone: "" };
+
+    // Prefetch products and categories for this conversation from cache
+    const products = await getProductsCached();
+    const categoriesList = Array.from(new Set(products.map(p => (p.category || "").trim()).filter(Boolean)));
+
+    async function showCategories(c = ctx) {
+        const categories = categoriesList;
+        if (!categories || !categories.length) {
+            await c.reply("Категорії мерчу поки відсутні.");
+            return null;
+        }
+        const kb = new InlineKeyboard();
+        for (const cName of categories) kb.text(cName, `merch_cat_${cName}`).row();
+        kb.text("🛒 Кошик", "merch_cart").row();
+        kb.text("Закрити", "merch_close").row();
+        await c.reply("Оберіть категорію:", { reply_markup: kb });
+        return categories;
+    }
+
+    async function showProductList(category, c = ctx) {
+        currentCategory = String(category || "").trim();
+        const items = products.filter((p) => (p.category || "").trim() === currentCategory);
+        if (!items.length) {
+            await c.reply("У цій категорії товарів немає.");
+            return;
+        }
+        const kb = new InlineKeyboard();
+        for (const item of items) {
+            kb.text(item.name, `merch_prod_${item.id}`).row();
+        }
+        kb.text("⬅️ До категорій", "merch_back").row();
+        kb.text("🛒 Кошик", "merch_cart").row();
+        kb.text("Закрити", "merch_close").row();
+        await c.reply(`Оберіть товар у категорії: ${currentCategory}`, { reply_markup: kb });
+    }
+
+    async function showProductCard(productId, c = ctx) {
+        const item = products.find((p) => String(p.id) === String(productId));
+        if (!item) {
+            await c.reply("Цей товар наразі недоступний.");
+            return;
+        }
+        const caption = `<b>${item.name}</b>\n` +
+            (item.description ? `${item.description}\n` : "") +
+            (item.color ? `Колір: ${item.color}\n` : "") +
+            `Ціна: ${item.price} грн\nВ наявності: ${item.stock}`;
+        const kb = new InlineKeyboard()
+            .text("➕ Додати до кошика", `merch_add_${item.id}`).row()
+            .text("⬅️ Назад до товарів", "merch_products_back").row()
+            .text("⬅️ До категорій", "merch_back").row()
+            .text("🛒 Кошик", "merch_cart").row();
+        try {
+            const cachedFileId = productImageFileIdCache.get(String(item.id));
+            if (cachedFileId) {
+                await c.replyWithPhoto(cachedFileId, { caption, parse_mode: "HTML", reply_markup: kb });
+            } else if (item.image) {
+                const msg = await c.replyWithPhoto(item.image, { caption, parse_mode: "HTML", reply_markup: kb });
+                const photos = msg?.photo || [];
+                const best = photos[photos.length - 1];
+                if (best?.file_id) {
+                    productImageFileIdCache.set(String(item.id), best.file_id);
+                }
+            } else {
+                await c.reply(caption, { parse_mode: "HTML", reply_markup: kb });
+            }
+        } catch {
+            await c.reply(caption, { parse_mode: "HTML", reply_markup: kb });
+        }
+    }
+
+    function addToCartById(productId, productsList) {
+        const item = productsList.find((p) => String(p.id) === String(productId));
+        if (!item) return false;
+        // find existing
+        const existing = (ctx.session.merchCart || []).find((i) => i.id === String(item.id));
+        if (existing) {
+            existing.quantity += 1;
+        } else {
+            ctx.session.merchCart.push({ id: String(item.id), name: item.name, price: item.price, quantity: 1, color: item.color || "" });
+        }
+        return true;
+    }
+
+    async function showCart(c = ctx) {
+        const cart = (ctx.session && ctx.session.merchCart) ? ctx.session.merchCart : [];
+        if (!cart.length) {
+            await c.reply("Кошик порожній.");
+            return;
+        }
+        let text = "🛒 Ваш кошик:\n\n";
+        let total = 0;
+        for (const it of cart) {
+            const line = `${it.name}${it.color ? ` (${it.color})` : ""} × ${it.quantity} = ${it.price * it.quantity} грн`;
+            text += `• ${line}\n`;
+            total += it.price * it.quantity;
+        }
+        text += `\nРазом: <b>${total} грн</b>`;
+        const kb = new InlineKeyboard()
+            .text("Оформити замовлення", "merch_checkout").row()
+            .text("Очистити", "merch_cart_clear").row()
+            .text("⬅️ До категорій", "merch_back").row()
+            .text("Закрити", "merch_close").row();
+        await c.reply(text, { parse_mode: "HTML", reply_markup: kb });
+    }
+
+    async function askCustomerName() {
+        await ctx.reply("Вкажіть, будь ласка, ваше ПІБ:");
+        const m = await conversation.waitFor("message:text");
+        checkout.name = m.message.text.trim();
+    }
+
+    async function askCustomerPhone() {
+        await ctx.reply("Вкажіть, будь ласка, ваш номер телефону:");
+        const m = await conversation.waitFor("message:text");
+        checkout.phone = m.message.text.trim();
+    }
+
+    async function confirmOrder(c = ctx) {
+        const cart = ctx.session.merchCart || [];
+        let summary = `Підтвердження замовлення:\nЗамовник: ${checkout.name}\nТелефон: ${checkout.phone}\n\n`;
+        let total = 0;
+        for (const it of cart) {
+            summary += `• ${it.name}${it.color ? ` (${it.color})` : ""} × ${it.quantity} = ${it.price * it.quantity} грн\n`;
+            total += it.price * it.quantity;
+        }
+        summary += `\nРазом: <b>${total} грн</b>\nПідтвердити замовлення?`;
+        const kb = new InlineKeyboard()
+            .text("Підтвердити", "merch_order_confirm").row()
+            .text("Скасувати", "merch_order_cancel").row();
+        await c.reply(summary, { parse_mode: "HTML", reply_markup: kb });
+    }
+
+    await showCategories();
+    while (true) {
+        // Wait specifically for callback data updates
+        const cb = await conversation.waitFor("callback_query:data");
+        const data = cb.callbackQuery?.data || "";
+
+        if (data === "merch_close") {
+            await cb.answerCallbackQuery();
+            await cb.reply("Дякуємо за інтерес до мерчу!");
+            return; // exit conversation
+        }
+        if (data === "merch_back") {
+            await cb.answerCallbackQuery();
+            await showCategories(cb);
+            continue;
+        }
+        if (data === "merch_products_back") {
+            await cb.answerCallbackQuery();
+            if (currentCategory) await showProductList(currentCategory, cb);
+            else await showCategories(cb);
+            continue;
+        }
+        if (data === "merch_cart") {
+            await cb.answerCallbackQuery();
+            await showCart(cb);
+            continue;
+        }
+        if (data === "merch_cart_clear") {
+            await cb.answerCallbackQuery();
+            ctx.session = ctx.session || {};
+            ctx.session.merchCart = [];
+            await cb.reply("Кошик очищено.");
+            await showCategories(cb);
+            continue;
+        }
+        if (data === "merch_checkout") {
+            await cb.answerCallbackQuery();
+            await askCustomerName();
+            await askCustomerPhone();
+            await confirmOrder(cb);
+            continue;
+        }
+        if (data === "merch_order_cancel") {
+            await cb.answerCallbackQuery();
+            await cb.reply("Замовлення скасовано.");
+            await showCart(cb);
+            continue;
+        }
+        if (data === "merch_order_confirm") {
+            await cb.answerCallbackQuery();
+            const cart = ctx.session.merchCart || [];
+            if (!cart.length) {
+                await cb.reply("Кошик порожній.");
+                continue;
+            }
+            const rows = cart.map(it => ({
+                date: new Date().toLocaleString("uk-UA"),
+                product: it.name,
+                color: it.color || "",
+                qty: it.quantity,
+                customer: checkout.name,
+                phone: checkout.phone,
+            }));
+            try {
+                await saveMerchOrdersSimple(rows);
+                await cb.reply("Замовлення прийнято! Ми зв'яжемося з вами для підтвердження.");
+                ctx.session.merchCart = [];
+            } catch (e) {
+                console.error("Error saving merch order:", e);
+                await cb.reply("Не вдалося зберегти замовлення. Спробуйте пізніше.");
+            }
+            continue;
+        }
+        if (data.startsWith("merch_cat_")) {
+            const category = data.replace("merch_cat_", "").trim();
+            await cb.answerCallbackQuery();
+            await showProductList(category, cb);
+            continue;
+        }
+        if (data.startsWith("merch_prod_")) {
+            const id = data.replace("merch_prod_", "");
+            await cb.answerCallbackQuery();
+            await showProductCard(id, cb);
+            continue;
+        }
+        if (data.startsWith("merch_add_")) {
+            const id = data.replace("merch_add_", "");
+            const ok = addToCartById(id, products);
+            try {
+                await cb.answerCallbackQuery({ text: ok ? "Додано до кошика" : "Товар недоступний" });
+            } catch {}
+            continue;
+        }
+
+        // Unknown clicks: just clear loader safely
+        try { await cb.answerCallbackQuery(); } catch {}
+    }
+}
+
 // Helper to build multi-select keyboard for coaches
 function buildMultiSelectKeyboard(options, selected, callbackPrefix) {
     const keyboard = new InlineKeyboard();
@@ -126,8 +382,8 @@ async function restartRegistration(ctx, reg) {
 }
 
 // Confirmation handler
-bot.on("callback_query:data", async (ctx) => {
-    const data = ctx.callbackQuery.data;
+bot.on("callback_query:data", async (ctx, next) => {
+    const data = ctx.callbackQuery.data || "";
     const reg = ctx.session.registration;
     try {
         if (data.startsWith("event_")) {
@@ -149,11 +405,9 @@ bot.on("callback_query:data", async (ctx) => {
                 ctx.session.registration.steps[0],
                 ctx.session.registration
             );
-        } else if (
-            data === "confirm_registration" &&
-            ctx.session.registration
-        ) {
-            // User confirmed registration
+            return;
+        }
+        if (data === "confirm_registration" && reg) {
             const userState = {
                 eventId: reg.eventId,
                 steps: reg.steps,
@@ -161,13 +415,12 @@ bot.on("callback_query:data", async (ctx) => {
             };
             await ctx.answerCallbackQuery();
             try {
-                // Convert arrays to strings for Google Sheets
                 for (const key in userState) {
                     if (key != 'steps' && Array.isArray(userState[key])) {
                         userState[key] = userState[key].join(", ");
                     }
                 }
-                const result = await saveRegistration(userState);
+                await saveRegistration(userState);
                 await ctx.reply("Реєстрація успішна! Дякуємо!");
                 ctx.session.registration = null;
             } catch (e) {
@@ -179,19 +432,21 @@ bot.on("callback_query:data", async (ctx) => {
                     "Сталася помилка при збереженні реєстрації. Спробуйте ще раз або зверніться до адміністратора."
                 );
             }
-        } else if (data === "cancel_registration" && ctx.session.registration) {
-            // User cancelled registration, exit
+            return;
+        }
+        if (data === "cancel_registration" && reg) {
             ctx.session.registration = null;
             await ctx.answerCallbackQuery();
             await ctx.reply("Реєстрацію скасовано. Ви можете почати реєстрацію знову у будь-який час.");
-        } else if (data === "retry_registration" && ctx.session.registration) {
-            // User wants to retry registration, restart
-            const reg = ctx.session.registration;
+            return;
+        }
+        if (data === "retry_registration" && reg) {
             await ctx.answerCallbackQuery();
             await ctx.reply("Починаємо реєстрацію спочатку.");
             await restartRegistration(ctx, reg);
-        } else if (reg) {
-            // Handle option steps
+            return;
+        }
+        if (reg) {
             const step = reg.steps[reg.currentStep];
             if (step && step.options) {
                 const safeKey = step.title.replace(/\s+/g, "_");
@@ -224,7 +479,6 @@ bot.on("callback_query:data", async (ctx) => {
                                 );
                             }
                         } else {
-                            // Toggle selection
                             const idx = reg.answers[safeKey].indexOf(coachName);
                             if (idx === -1) {
                                 reg.answers[safeKey].push(coachName);
@@ -232,7 +486,6 @@ bot.on("callback_query:data", async (ctx) => {
                                 reg.answers[safeKey].splice(idx, 1);
                             }
                             await ctx.answerCallbackQuery();
-                            // Rebuild and edit the keyboard to reflect selection
                             const keyboard = buildMultiSelectKeyboard(
                                 step.options,
                                 reg.answers[safeKey],
@@ -252,7 +505,6 @@ bot.on("callback_query:data", async (ctx) => {
                         await sendStep(ctx, reg.steps[reg.currentStep], reg);
                     } else {
                         await ctx.answerCallbackQuery();
-                        // Show summary and ask for confirmation
                         const summary = buildSummary(reg);
                         const keyboard = new InlineKeyboard()
                             .text("Підтвердити", "confirm_registration")
@@ -263,11 +515,16 @@ bot.on("callback_query:data", async (ctx) => {
                             reply_markup: keyboard,
                         });
                     }
+                    return;
                 }
             }
         }
+        // Not handled here: let other middlewares (e.g., merch conversation) handle
+        await next();
     } catch (error) {
         console.error("Error answering callback query:", error);
+        // If error, still allow next middlewares to try
+        try { await next(); } catch {}
     }
 });
 
@@ -324,6 +581,7 @@ async function generateDynamicStep(event) {
 // 3. Register the conversation
 bot.use(createConversation(registrationConversation));
 bot.use(createConversation(eventsConversation));
+bot.use(createConversation(merchConversation));
 
 // 4. Command to start registration
 bot.command(COMMANDS.REGISTER, async (ctx) => {
@@ -347,6 +605,9 @@ bot.command(COMMANDS.INFO, async (ctx) => {
 
 bot.command(COMMANDS.EVENTS, async (ctx) => {
     await ctx.conversation.enter("eventsConversation");
+});
+bot.command("merch", async (ctx) => {
+    await ctx.conversation.enter("merchConversation");
 });
 bot.command(COMMANDS.HELP, async (ctx) => {
     await ctx.reply(MESSAGES.HELP);

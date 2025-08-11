@@ -22,6 +22,7 @@ const serviceAccountAuth = new JWT({
 });
 
 const doc = new GoogleSpreadsheet(process.env.SPREADSHEET_ID, serviceAccountAuth);
+const merchDoc = new GoogleSpreadsheet(process.env.MERCH_SHEET_ID, serviceAccountAuth);
 
 
 // Function to access the spreadsheet and return competitions
@@ -290,44 +291,65 @@ function parseCsvToArray(value) {
     .filter((s) => s.length > 0);
 }
 
-export async function getMerch() {
+// Normalize Google Drive links to direct-view URLs for Telegram
+function normalizeDriveLinkToDirectView(url) {
+  if (!url) return "";
+  const str = String(url);
+  let m = str.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (m && m[1]) return `https://drive.google.com/uc?export=view&id=${m[1]}`;
+  m = str.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (m && m[1]) return `https://drive.google.com/uc?export=view&id=${m[1]}`;
+  return str;
+}
+
+export async function getMerchProducts() {
   try {
-    await doc.loadInfo();
-    const sheet = doc.sheetsByTitle["merch"];
+    await merchDoc.loadInfo();
+    const sheet = merchDoc.sheetsByTitle["каталог"];
     if (!sheet) {
-      console.error("No 'merch' sheet found");
+      console.error("Не знайдено аркуш 'каталог' у таблиці мерчу");
       return [];
     }
     const rows = await sheet.getRows();
-    return rows.map((row) => ({
-      id: row.get("id"),
-      name: row.get("name"),
-      category: row.get("category"),
-      price: row.get("price"),
-      colors: parseCsvToArray(row.get("colors")),
-      sizes: parseCsvToArray(row.get("sizes")),
-      image: row.get("image"),
-      description: row.get("description") || '',
-    }));
+    return rows.map((row) => {
+      const id = row.get("Код");
+      const name = row.get("Назва");
+      const category = row.get("Категорія");
+      const description = row.get("Опис");
+      const color = row.get("Колір");
+      const price = Number(row.get("Ціна")) || 0;
+      const stock = Number(row.get("В наявності")) || 0;
+      const imageRaw = row.get("Зображення");
+      const image = normalizeDriveLinkToDirectView(imageRaw);
+      return {
+        id: String(id),
+        name,
+        category,
+        description,
+        color,
+        price,
+        stock,
+        image,
+      };
+    });
   } catch (error) {
-    console.error("Error fetching merch:", error);
+    console.error("Помилка отримання мерчу:", error);
     return [];
   }
 }
 
 export async function getMerchCategories() {
-  const items = await getMerch();
-  const set = new Set(items.map((i) => i.category).filter(Boolean));
-  return Array.from(set);
+  const items = await getMerchProducts();
+  return Array.from(new Set(items.map((i) => i.category).filter(Boolean)));
 }
 
 export async function saveMerchOrder(order) {
   try {
-    await doc.loadInfo();
-    let sheet = doc.sheetsByTitle["merch_orders"];
+    await merchDoc.loadInfo();
+    let sheet = merchDoc.sheetsByTitle["замовлення"];
     if (!sheet) {
-      sheet = await doc.addSheet({
-        title: "merch_orders",
+      sheet = await merchDoc.addSheet({
+        title: "замовлення",
         headerValues: [
           "timestamp",
           "user_id",
@@ -372,6 +394,38 @@ export async function saveMerchOrder(order) {
     return true;
   } catch (error) {
     console.error("Error saving merch order:", error);
+    throw error;
+  }
+}
+
+export async function saveMerchOrdersSimple(rows) {
+  // rows: Array<{ date: string, product: string, color: string, qty: number, customer: string, phone: string }>
+  try {
+    await merchDoc.loadInfo();
+    let sheet = merchDoc.sheetsByTitle["замовлення"];
+    if (!sheet) {
+      sheet = await merchDoc.addSheet({
+        title: "замовлення",
+        headerValues: ["Дата", "Товар", "Колір", "Кількість", "Замовник", "Телефон"],
+      });
+    } else {
+      // Ensure header row is loaded
+      try { await sheet.loadHeaderRow(); } catch {}
+    }
+
+    for (const r of rows) {
+      await sheet.addRow({
+        "Дата": r.date,
+        "Товар": r.product,
+        "Колір": r.color,
+        "Кількість": r.qty,
+        "Замовник": r.customer,
+        "Телефон": r.phone,
+      });
+    }
+    return true;
+  } catch (error) {
+    console.error("Error saving simple merch orders:", error);
     throw error;
   }
 }
