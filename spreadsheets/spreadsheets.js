@@ -430,3 +430,46 @@ export async function saveMerchOrdersSimple(rows) {
   }
 }
 
+export async function getCategoryBannerImage(categoryName) {
+  try {
+    await merchDoc.loadInfo();
+    const sheet = merchDoc.sheetsByTitle["категорії"];
+    if (!sheet) {
+      console.error("Не знайдено аркуш 'категорії' у таблиці мерчу");
+      return "";
+    }
+    const rows = await sheet.getRows();
+    const nameTrim = String(categoryName || "").trim();
+    const row = rows.find(r => String(r.get("Категорія") || "").trim() === nameTrim);
+    if (!row) return "";
+    const raw = row.get("Зображення");
+    return normalizeDriveLinkToDirectView(raw);
+  } catch (e) {
+    console.error("Помилка отримання банера категорії:", e);
+    return "";
+  }
+}
+
+export async function getCategoryBanners() {
+  try {
+    await merchDoc.loadInfo();
+    const sheet = merchDoc.sheetsByTitle["категорії"];
+    if (!sheet) {
+      console.error("Не знайдено аркуш 'категорії' у таблиці мерчу");
+      return {};
+    }
+    const rows = await sheet.getRows();
+    const map = {};
+    for (const r of rows) {
+      const name = String(r.get("Категорія") || "").trim();
+      if (!name) continue;
+      const raw = r.get("Зображення");
+      map[name] = normalizeDriveLinkToDirectView(raw);
+    }
+    return map;
+  } catch (e) {
+    console.error("Помилка отримання всіх банерів категорій:", e);
+    return {};
+  }
+}
+

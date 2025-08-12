@@ -8,8 +8,8 @@ import {
     getCoaches,
     saveRegistration,
     getMerchProducts,
-    getMerchCategories,
-    saveMerchOrdersSimple,
+    getCategoryBanners,
+    saveMerchOrdersSimple
 } from "./spreadsheets/spreadsheets.js";
 import { COMMANDS, MESSAGES } from "./utils/constants.js";
 import { InlineKeyboard, Keyboard } from "grammy";
@@ -30,6 +30,20 @@ async function getProductsCached() {
     productCache = { items, fetchedAt: now };
     return items;
 }
+
+// Global cached category banners (name -> image URL), refreshed periodically
+let CATEGORY_BANNERS_CACHE = {};
+async function refreshCategoryBanners() {
+    try {
+        CATEGORY_BANNERS_CACHE = await getCategoryBanners();
+        console.log("Cached category banners:", Object.keys(CATEGORY_BANNERS_CACHE).length);
+    } catch (e) {
+        console.error("Failed to refresh category banners:", e);
+    }
+}
+// Prime cache and refresh every 15 minutes
+refreshCategoryBanners();
+setInterval(refreshCategoryBanners, 15 * 60 * 1000);
 
 // 1. Setup bot and session
 const bot = new Bot(process.env.BOT_TOKEN);
@@ -96,6 +110,7 @@ async function merchConversation(conversation, ctx) {
     // ensure session and cart exist
     ctx.session = ctx.session || {};
     if (!ctx.session.merchCart) ctx.session.merchCart = [];
+    if (typeof ctx.session.merchOrderLockTs !== "number") ctx.session.merchOrderLockTs = 0;
     let currentCategory = null;
     let checkout = { name: "", phone: "" };
 
@@ -108,6 +123,10 @@ async function merchConversation(conversation, ctx) {
         if (!categories || !categories.length) {
             await c.reply("Категорії мерчу поки відсутні.");
             return null;
+        }
+        const allBanner = CATEGORY_BANNERS_CACHE["Усі товари"]; // optional global banner
+        if (allBanner) {
+            try { await c.replyWithPhoto(allBanner, { caption: "Категорії мерчу" }); } catch {}
         }
         const kb = new InlineKeyboard();
         for (const cName of categories) kb.text(cName, `merch_cat_${cName}`).row();
@@ -195,12 +214,20 @@ async function merchConversation(conversation, ctx) {
             total += it.price * it.quantity;
         }
         text += `\nРазом: <b>${total} грн</b>`;
-        const kb = new InlineKeyboard()
+        const summaryKb = new InlineKeyboard()
             .text("Оформити замовлення", "merch_checkout").row()
             .text("Очистити", "merch_cart_clear").row()
             .text("⬅️ До категорій", "merch_back").row()
             .text("Закрити", "merch_close").row();
-        await c.reply(text, { parse_mode: "HTML", reply_markup: kb });
+        await c.reply(text, { parse_mode: "HTML", reply_markup: summaryKb });
+
+        // Per-item controls
+        for (const it of cart) {
+            const line = `${it.name}${it.color ? ` (${it.color})` : ""} — кількість: ${it.quantity}`;
+            const kb = new InlineKeyboard()
+                .text("−", `cart_dec_${it.id}`).text("+", `cart_inc_${it.id}`).text("❌", `cart_rm_${it.id}`).row();
+            await c.reply(line, { reply_markup: kb });
+        }
     }
 
     async function askCustomerName() {
@@ -265,6 +292,45 @@ async function merchConversation(conversation, ctx) {
             await showCategories(cb);
             continue;
         }
+        if (data.startsWith("cart_inc_")) {
+            await cb.answerCallbackQuery();
+            const id = data.replace("cart_inc_", "");
+            const cart = ctx.session.merchCart || [];
+            const item = cart.find(x => String(x.id) === String(id));
+            if (item) item.quantity += 1;
+            await cb.reply("Оновлено кількість (+1)");
+            await showCart(cb);
+            continue;
+        }
+        if (data.startsWith("cart_dec_")) {
+            await cb.answerCallbackQuery();
+            const id = data.replace("cart_dec_", "");
+            const cart = ctx.session.merchCart || [];
+            const item = cart.find(x => String(x.id) === String(id));
+            if (item) {
+                item.quantity = Math.max(0, item.quantity - 1);
+                if (item.quantity === 0) {
+                    ctx.session.merchCart = cart.filter(x => String(x.id) !== String(id));
+                }
+            }
+            await cb.reply("Оновлено кількість (−1)");
+            await showCart(cb);
+            continue;
+        }
+        if (data.startsWith("cart_rm_")) {
+            await cb.answerCallbackQuery();
+            const id = data.replace("cart_rm_", "");
+            const cart = ctx.session.merchCart || [];
+            ctx.session.merchCart = cart.filter(x => String(x.id) !== String(id));
+            await cb.reply("Товар видалено з кошика");
+            if ((ctx.session.merchCart || []).length === 0) {
+                await cb.reply("Кошик порожній.");
+                await showCategories(cb);
+            } else {
+                await showCart(cb);
+            }
+            continue;
+        }
         if (data === "merch_checkout") {
             await cb.answerCallbackQuery();
             await askCustomerName();
@@ -279,11 +345,19 @@ async function merchConversation(conversation, ctx) {
             continue;
         }
         if (data === "merch_order_confirm") {
-            await cb.answerCallbackQuery();
+            await cb.answerCallbackQuery({ text: "Обробляємо замовлення…" });
+            // Prevent duplicate confirmations within 15 seconds
+            const now = Date.now();
+            if (now - (ctx.session.merchOrderLockTs || 0) < 15000) {
+                await cb.reply("Замовлення вже обробляється. Зачекайте, будь ласка.");
+                continue;
+            }
+            ctx.session.merchOrderLockTs = now;
             const cart = ctx.session.merchCart || [];
             if (!cart.length) {
                 await cb.reply("Кошик порожній.");
-                continue;
+                ctx.session.merchOrderLockTs = 0;
+                return; // end conversation after successful order
             }
             const rows = cart.map(it => ({
                 date: new Date().toLocaleString("uk-UA"),
@@ -297,15 +371,22 @@ async function merchConversation(conversation, ctx) {
                 await saveMerchOrdersSimple(rows);
                 await cb.reply("Замовлення прийнято! Ми зв'яжемося з вами для підтвердження.");
                 ctx.session.merchCart = [];
+                ctx.session.merchOrderLockTs = 0;
+                return; // end conversation after successful order
             } catch (e) {
                 console.error("Error saving merch order:", e);
                 await cb.reply("Не вдалося зберегти замовлення. Спробуйте пізніше.");
+                ctx.session.merchOrderLockTs = 0;
+                return; // end conversation on error as well
             }
-            continue;
         }
         if (data.startsWith("merch_cat_")) {
             const category = data.replace("merch_cat_", "").trim();
             await cb.answerCallbackQuery();
+            const banner = CATEGORY_BANNERS_CACHE[category];
+            if (banner) {
+                try { await cb.replyWithPhoto(banner, { caption: `Категорія: ${category}` }); } catch {}
+            }
             await showProductList(category, cb);
             continue;
         }
